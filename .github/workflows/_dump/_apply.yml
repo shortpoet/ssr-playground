@@ -1,0 +1,84 @@
+---
+name: "Terraform Apply"
+on:
+  workflow_call:
+    inputs:
+      provider:
+        description: 'Specifies the cloud provider.'
+        required: true
+        type: string
+      path:
+        description: 'Specifies the path of the root terraform module.'
+        required: true
+        type: string
+      tf_version:
+        description: 'Specifies version of Terraform to use. e.g: 1.1.0 Default=latest.'
+        required: false
+        type: string
+        default: latest
+      gh_environment:
+        description: 'Specifies the GitHub deployment environment.'
+        required: false
+        type: string
+        default: null
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.gh_environment }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.path }}
+    env:
+      TF_LOG: TRACE
+      TF_LOG_PATH: tf.log
+      TF_IN_AUTOMATION: true
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3.3.0
+
+      - name: AWS Credentials
+        if: ${{ inputs.provider == 'aws' }}
+        # uses: ./.github/actions/aws-creds
+        uses: shortpoet/tf-web/.github/actions/aws-creds@develop
+        with:
+          aws-profile: ${{ vars.AWS_PROFILE }}
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ vars.AWS_DEFAULT_REGION }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-duration-seconds: 1200
+
+      - name: Download Artifact
+        if: inputs.gh_environment != 'uat'
+        uses: actions/download-artifact@v3.0.2
+        with:
+          name: "${{ inputs.gh_environment }}"
+          path: ${{ inputs.path }}
+
+      - name: Download Artifact - GH CLI
+        if: inputs.gh_environment == 'uat'
+        run: |
+          OTHER_REPO="shortpoet/tf-web"
+          WF_NAME="Infra"
+          BRANCH='uat'
+          ARTIFACT_NAME="$BRANCH"
+          RUN_ID=$(gh run --repo "${OTHER_REPO}" list --workflow "${WF_NAME}" --branch "${BRANCH}" --json databaseId --jq '.[0].databaseId')
+          gh run --repo "${OTHER_REPO}" download "${RUN_ID}" -n "${ARTIFACT_NAME}"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Decompress TF Plan artifact
+        run: |
+          rm .terraform.lock.hcl
+          unzip "${{ inputs.gh_environment }}".zip
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2.0.3
+        with:
+          terraform_version: ${{ inputs.tf_version }}
+
+      - name: Terraform Apply
+        run: terraform apply plan.tfplan
